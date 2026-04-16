@@ -133,6 +133,220 @@ MyServers/
 | File dialogs | [rfd](https://github.com/PolyMeilex/rfd) |
 | Static serving | [tower-http](https://github.com/tower-rs/tower-http) ServeDir |
 
+## FAQ
+
+### General — Why not Docker?
+
+<details>
+<summary><strong>How is this different from Docker?</strong></summary>
+
+Docker is a container runtime that virtualizes an entire OS layer, pulls images, manages volumes, networks, and orchestration. MyServers is a **lightweight process manager** — it runs your apps as native processes on your machine with zero abstraction overhead. There's no image to build, no Dockerfile to write, no daemon to keep running. You double-click an exe and your apps are live.
+</details>
+
+<details>
+<summary><strong>Docker already works. Why would I switch?</strong></summary>
+
+You don't have to switch. Docker is the right tool for production deployments, CI pipelines, and reproducible environments. MyServers targets a different problem: **day-to-day local development** where you're running 3–8 projects simultaneously and don't want to manage `docker-compose.yml`, rebuild images after every dependency change, or debug volume mount issues. If you're already happy with Docker for local dev, keep using it.
+</details>
+
+<details>
+<summary><strong>Docker gives me reproducible environments. Doesn't this just "run stuff"?</strong></summary>
+
+Yes — and that's the point. During active development, you already have your SDKs installed locally (.NET, Node.js, etc.). Wrapping every `npm start` in a container adds build time, RAM overhead, and debugging friction. MyServers leverages the tools you already have and gives you a dashboard to manage them. For reproducibility in CI/staging, keep using Docker.
+</details>
+
+<details>
+<summary><strong>Docker Compose lets me start everything with one command too.</strong></summary>
+
+True, but every dependency change means rebuilding the image. With MyServers, you change a file, hit Start, and your app picks up the change — same speed as running it from a terminal. No layer caching surprises, no stale `node_modules` in a volume, no waiting for `docker build`.
+</details>
+
+<details>
+<summary><strong>Docker provides network isolation. How is running everything on localhost safe?</strong></summary>
+
+For local development, network isolation is rarely a requirement — you're the only user. MyServers binds apps to `localhost` on ports you choose. If you need network isolation, firewall rules, or multi-machine topologies, Docker or VMs are the right tool. MyServers doesn't try to replace infrastructure tooling.
+</details>
+
+<details>
+<summary><strong>My team standardizes on Docker so everyone has the same environment.</strong></summary>
+
+That's a valid workflow for teams. MyServers is not anti-Docker — it's for the individual developer who has already set up their local toolchain and wants a faster inner-loop. You can use Docker for team consistency and MyServers for your personal dev workflow simultaneously.
+</details>
+
+### Resource & Performance
+
+<details>
+<summary><strong>How much RAM does Docker use vs MyServers?</strong></summary>
+
+Docker Desktop on Windows typically consumes 1–4 GB of RAM for the WSL2 VM before any containers start. Each container adds its own memory footprint. MyServers itself uses ~10–15 MB of RAM — it's a native Rust binary with an embedded web UI. Your apps run as bare processes with no virtualization overhead.
+</details>
+
+<details>
+<summary><strong>My machine has 8 GB RAM and Docker makes it crawl. Will this help?</strong></summary>
+
+Significantly. With Docker Desktop eliminated, you reclaim 1–4 GB immediately. Your apps run as native processes with direct hardware access — no WSL2 VM, no container runtime, no overlay filesystem. On constrained machines, the difference is dramatic.
+</details>
+
+<details>
+<summary><strong>Does this support hot reload / file watching?</strong></summary>
+
+MyServers runs your apps natively, so whatever hot-reload your framework provides (Vite HMR, `dotnet watch`, `nodemon`) works out of the box. Docker often requires volume mounts and filesystem event forwarding (which is notoriously slow on Windows/macOS with Docker bind mounts). With MyServers, file watching is instant because there's no virtualization layer.
+</details>
+
+<details>
+<summary><strong>Startup time comparison?</strong></summary>
+
+Docker: pull image (first time) → build layers → start container → app boot. MyServers: run build commands → app is live. There's no daemon startup, no image layer resolution, no container creation. For a typical Node.js app, you save 5–30 seconds per restart.
+</details>
+
+### Private Feeds & Authentication
+
+<details>
+<summary><strong>I use private NuGet feeds / npm registries. Does this work?</strong></summary>
+
+Yes, seamlessly. Because MyServers runs your build commands as native processes, they inherit your existing authentication setup — `.npmrc`, `nuget.config`, credential providers, environment variables — exactly the same as running from a terminal. There's nothing to configure inside MyServers.
+</details>
+
+<details>
+<summary><strong>Docker requires special setup for private feeds (tokens, secrets, BuildKit). What about here?</strong></summary>
+
+This is one of the biggest pain points MyServers eliminates. With Docker, accessing private npm registries or NuGet feeds during `docker build` requires multi-stage builds, `--mount=type=secret`, or baking tokens into images (a security risk). With MyServers, `npm install` or `dotnet restore` just works because it's running in your authenticated user session with all your credentials already available.
+</details>
+
+<details>
+<summary><strong>We use Azure Artifacts / GitHub Packages / JFrog Artifactory. Any special config?</strong></summary>
+
+None. If `npm install` or `dotnet restore` works in your terminal, it works in MyServers. Your credential helpers, PATs in `.npmrc`, Azure Artifacts Credential Provider, and `nuget.config` sources are all picked up automatically. No need to pass secrets into a container build context.
+</details>
+
+<details>
+<summary><strong>Our private registry requires VPN access. Does this work?</strong></summary>
+
+Yes. Your processes run under your OS network stack directly. If you're on the VPN, your apps can reach the private registry — no Docker DNS issues, no network mode hacks, no `host.docker.internal` workarounds.
+</details>
+
+<details>
+<summary><strong>I use a corporate proxy for package downloads. Docker is a nightmare for this.</strong></summary>
+
+With MyServers, your apps inherit the system proxy settings automatically — same as any native process. Docker's proxy configuration (daemon-level `HTTP_PROXY`, build-arg injection, WSL2 proxy forwarding) is a well-known pain point that simply doesn't exist here.
+</details>
+
+### Scrutiny & Hard Questions
+
+<details>
+<summary><strong>This is just a process manager. I can do the same with a bash script.</strong></summary>
+
+You can. But will your bash script give you a web dashboard, live color-coded logs, one-click start/stop, system tray integration, auto-start on launch, persistent log files, and static file serving with SPA fallback? MyServers packages all of this into a single 2 MB executable with zero setup.
+</details>
+
+<details>
+<summary><strong>PM2 already does process management for Node.js. Why this?</strong></summary>
+
+PM2 is Node.js-specific and requires Node.js to be installed. MyServers manages any framework (.NET, Node.js, React, Angular, Vue, Next.js, Express) with a unified UI. It's also a single binary with no runtime dependency — you don't need Node.js installed just to manage your processes.
+</details>
+
+<details>
+<summary><strong>What about Linux and macOS support?</strong></summary>
+
+Currently Windows-only. The system tray integration and file dialogs use Windows APIs. Cross-platform support is on the roadmap but not available yet. If you develop on Linux/macOS, this tool isn't for you right now.
+</details>
+
+<details>
+<summary><strong>What happens if an app crashes?</strong></summary>
+
+MyServers detects when a process exits and updates the dashboard status. You can see the exit code and the full log output to diagnose the issue. There's no automatic restart yet — you click Start again. Auto-restart on crash is a potential future feature.
+</details>
+
+<details>
+<summary><strong>Can this run databases (PostgreSQL, Redis, MongoDB)?</strong></summary>
+
+Technically yes — if the database is installed natively on your machine, you can manage it through MyServers. But this is where Docker genuinely shines: spinning up disposable, pre-configured database instances. Most developers will use MyServers for their application code and Docker (or native installs) for databases.
+</details>
+
+<details>
+<summary><strong>Can it run multiple instances of the same app on different ports?</strong></summary>
+
+Yes. Add the same project directory multiple times with different names and ports. Each entry runs independently with its own process, logs, and lifecycle.
+</details>
+
+<details>
+<summary><strong>What about microservices with 15+ services? Docker Compose handles that.</strong></summary>
+
+MyServers can manage 15+ apps, but if your services have complex inter-dependencies, health checks, and startup ordering, Docker Compose's dependency graph (`depends_on`, health checks) is more appropriate. MyServers starts apps independently — it doesn't model dependencies between services.
+</details>
+
+<details>
+<summary><strong>Docker has health checks. Does MyServers monitor app health?</strong></summary>
+
+MyServers shows running/stopped status and live log output, but it doesn't perform HTTP health checks or liveness probes. You can see if a process is alive and inspect its logs, but there's no automated "restart if unhealthy" logic. For local dev, checking the dashboard is usually sufficient.
+</details>
+
+<details>
+<summary><strong>What if two apps try to use the same port?</strong></summary>
+
+The second app will fail to bind and you'll see the error in the logs. MyServers doesn't enforce port uniqueness at config time (you might intentionally stop one before starting another), but the error is immediately visible in the dashboard.
+</details>
+
+<details>
+<summary><strong>Does it support HTTPS locally?</strong></summary>
+
+MyServers' built-in static server uses HTTP. However, if your app itself runs HTTPS (e.g., `dotnet` with dev certs, or Node.js with a self-signed cert), that works fine since MyServers just runs your command. For the dashboard itself, it's `http://localhost:1234`.
+</details>
+
+<details>
+<summary><strong>How is this different from Visual Studio's multi-project launch?</strong></summary>
+
+VS multi-startup is IDE-specific and limited to projects within a single solution. MyServers is IDE-agnostic — it manages any project from any framework, and it runs in the background via the system tray even when no IDE is open. It's also useful for running frontend and backend projects that live in separate repos.
+</details>
+
+<details>
+<summary><strong>Can I use this in CI/CD?</strong></summary>
+
+No. MyServers is a desktop tool with a GUI, system tray, and file dialogs. It's designed for developer workstations, not headless CI environments. For CI/CD, use Docker, shell scripts, or your CI platform's native tooling.
+</details>
+
+<details>
+<summary><strong>What about environment parity? Docker ensures dev matches production.</strong></summary>
+
+Fair point. MyServers runs your code on your native OS with your installed SDK versions, which may differ from production. If strict environment parity matters (e.g., matching a specific Linux distro, library versions, or system dependencies), Docker is the right choice. MyServers optimizes for **developer speed**, not environment parity.
+</details>
+
+<details>
+<summary><strong>Is my app data safe? Where is everything stored?</strong></summary>
+
+App configurations are stored in `%APPDATA%\MyServers\apps.json` and logs in `%APPDATA%\MyServers\logs\`. Nothing is sent to the cloud. Everything is local and plaintext — you can back it up, version-control it, or delete it freely.
+</details>
+
+<details>
+<summary><strong>Can I share my MyServers configuration with my team?</strong></summary>
+
+You can copy `apps.json` and `presets.json`, but paths are absolute to your machine, so teammates would need to adjust project directories. This is simpler than a Dockerfile but less portable. A future enhancement could support relative paths or workspace-level config files.
+</details>
+
+<details>
+<summary><strong>What if I need to run a Linux-only tool on Windows?</strong></summary>
+
+You can't. MyServers runs native Windows processes. If your project requires Linux-specific tooling (e.g., certain native modules, shell scripts with bash-isms), you need WSL2 or Docker. MyServers doesn't virtualize anything.
+</details>
+
+<details>
+<summary><strong>Does it support custom presets beyond the built-in ones?</strong></summary>
+
+Yes. Edit `presets.json` to add any project type with custom build commands, serve modes, ports, and environment variables. You can add presets for Python/Flask, Go, Java/Spring, or anything else.
+</details>
+
+<details>
+<summary><strong>This is Windows-only and 2 MB. That feels too simple. What's the catch?</strong></summary>
+
+No catch. Constraints are features: Windows-only means native APIs, no Electron overhead, and tight OS integration. 2 MB means no bundled runtime, no webview framework, no bloat. It uses your default browser for the dashboard and Rust for the backend. Simple is the point.
+</details>
+
+<details>
+<summary><strong>Can I run Docker containers through MyServers?</strong></summary>
+
+Yes, technically. Set the run command to `docker run ...` or `docker compose up`. MyServers will manage the process and capture the logs. But at that point, you're using Docker with MyServers as a log viewer — which is still useful if you want a unified dashboard for some native apps and some containerized services.
+</details>
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
