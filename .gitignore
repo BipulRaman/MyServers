@@ -1,0 +1,17 @@
+# Build artifacts
+/target/
+/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# App data (created at runtime in %APPDATA%)
+/data/

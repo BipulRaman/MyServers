@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>MyServers</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+  <header class="header">
+    <div class="header-left">
+      <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <h1>MyServers</h1>
+    </div>
+    <div class="header-right">
+      <div class="stats">
+        <span class="stat"><b id="statRunning">0</b> running</span>
+        <span class="stat-sep"></span>
+        <span class="stat muted"><b id="statStopped">0</b> stopped</span>
+      </div>
+      <button class="btn btn-accent" id="btnAdd">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New Application
+      </button>
+    </div>
+  </header>
+
+  <main class="main">
+    <div id="appList"></div>
+  </main>
+
+  <div id="toastBox" class="toast-wrap"></div>
+
+  <!-- ═══ Add/Edit Modal ═══ -->
+  <div id="modal" class="overlay hidden"><div class="overlay-bg"></div>
+    <div class="dialog">
+      <div class="dialog-head">
+        <h2 id="modalTitle">New Application</h2>
+        <button class="icon-btn" onclick="closeModal('modal')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <form id="appForm" autocomplete="off" class="dialog-body">
+        <input type="hidden" id="fId"/>
+
+        <div class="field">
+          <label for="fName">Application Name</label>
+          <input type="text" id="fName" required placeholder="e.g. my-web-api"/>
+        </div>
+
+        <div class="field-row">
+          <div class="field grow">
+            <label for="fDir">Project Directory</label>
+            <div class="field-with-btn">
+              <input type="text" id="fDir" required placeholder="e.g. D:\Projects\my-app"/>
+              <button type="button" class="browse-btn" onclick="pickFolder('fDir')">Browse</button>
+            </div>
+          </div>
+          <div class="field" style="width:140px">
+            <label for="fType">Type</label>
+            <select id="fType">
+              <option value="dotnet">.NET</option>
+              <option value="node">Node.js</option>
+              <option value="react">React</option>
+              <option value="nextjs">Next.js</option>
+              <option value="angular">Angular</option>
+              <option value="vue">Vue</option>
+              <option value="express">Express</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field" style="width:140px">
+            <label for="fServe">Serve Mode</label>
+            <select id="fServe">
+              <option value="command">Command</option>
+              <option value="static">Static Folder</option>
+            </select>
+          </div>
+          <div class="field" style="width:100px">
+            <label for="fPort">Port</label>
+            <input type="number" id="fPort" placeholder="3000"/>
+          </div>
+          <div class="field grow" id="fRunWrap">
+            <label for="fRun">Run Command</label>
+            <input type="text" id="fRun" placeholder="e.g. node dist/index.js"/>
+          </div>
+          <div class="field grow hidden" id="fStaticWrap">
+            <label for="fStatic">Static Folder</label>
+            <input type="text" id="fStatic" placeholder="e.g. ./build"/>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="fBuild">Build Steps <span class="field-hint">one command per line — runs before start</span></label>
+          <textarea id="fBuild" rows="3" placeholder="npm install&#10;npm run build"></textarea>
+        </div>
+
+        <div class="field">
+          <label for="fEnv">Environment Variables <span class="field-hint">KEY=VALUE per line</span></label>
+          <textarea id="fEnv" rows="2" placeholder="NODE_ENV=production"></textarea>
+        </div>
+
+        <label class="switch-row">
+          <span class="switch"><input type="checkbox" id="fAuto"/><span class="track"></span></span>
+          Auto-start when MyServers launches
+        </label>
+
+        <div class="dialog-foot">
+          <button type="button" class="btn btn-flat" onclick="closeModal('modal')">Cancel</button>
+          <button type="submit" class="btn btn-accent">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ═══ Logs Modal ═══ -->
+  <div id="logModal" class="overlay hidden"><div class="overlay-bg"></div>
+    <div class="dialog dialog-lg">
+      <div class="dialog-head">
+        <h2 id="logTitle">Logs</h2>
+        <div class="head-actions">
+          <button class="btn btn-flat btn-sm" id="btnExportLog">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="ic"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export
+          </button>
+          <button class="icon-btn" id="btnCloseLogs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        </div>
+      </div>
+      <div class="dialog-body">
+        <div class="tab-bar">
+          <button class="tab active" data-tab="run">Runtime</button>
+          <button class="tab" data-tab="build">Build</button>
+          <button class="tab" data-tab="applog">Persisted Log</button>
+        </div>
+        <pre id="logContent" class="terminal"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

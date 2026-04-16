@@ -1,0 +1,29 @@
+[package]
+name = "myservers"
+version = "1.0.0"
+edition = "2021"
+description = "Local CI/CD server manager — desktop app with system tray"
+
+[[bin]]
+name = "myservers"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+tray-icon = "0.14"
+open = "5"
+rust-embed = "8"
+mime_guess = "2"
+rfd = "0.14"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
