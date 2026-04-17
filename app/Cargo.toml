@@ -21,7 +21,7 @@ mime_guess = "2"
 rfd = "0.14"
 futures-util = "0.3"
 async-stream = "0.3"
-ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs", "json"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging"] }
