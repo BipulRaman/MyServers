@@ -32,6 +32,8 @@ pub struct SavedApp {
     pub auto_start: bool,
     #[serde(default)]
     pub script_file: Option<String>,
+    #[serde(default)]
+    pub order: u32,
 }
 
 // ─── Runtime State ──────────────────────────────────────────────────
@@ -72,6 +74,7 @@ pub struct AppResponse {
     pub building: bool,
     pub auto_start: bool,
     pub script_file: Option<String>,
+    pub order: u32,
 }
 
 // ─── App Manager ────────────────────────────────────────────────────
@@ -145,7 +148,9 @@ impl AppManager {
 
     pub fn list_apps(&self) -> Vec<AppResponse> {
         let state = self.state.lock().unwrap();
-        state.apps.values().map(|a| AppResponse {
+        let mut list: Vec<_> = state.apps.values().collect();
+        list.sort_by_key(|a| a.entry.order);
+        list.into_iter().map(|a| AppResponse {
             id: a.entry.id,
             name: a.entry.name.clone(),
             project_dir: a.entry.project_dir.clone(),
@@ -160,15 +165,30 @@ impl AppManager {
             building: a.status == "building",
             auto_start: a.entry.auto_start,
             script_file: a.entry.script_file.clone(),
+            order: a.entry.order,
         }).collect()
+    }
+
+    pub fn reorder_apps(&self, ids: Vec<u32>) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            if let Some(app) = state.apps.get_mut(id) {
+                app.entry.order = i as u32;
+            }
+        }
+        drop(state);
+        self.save();
+        Ok(())
     }
 
     pub fn add_app(&self, app: SavedApp) -> u32 {
         let mut state = self.state.lock().unwrap();
         let id = state.next_id;
         state.next_id += 1;
+        let max_order = state.apps.values().map(|a| a.entry.order).max().unwrap_or(0);
         let mut entry = app;
         entry.id = id;
+        entry.order = if state.apps.is_empty() { 0 } else { max_order + 1 };
         state.apps.insert(id, AppRuntime {
             entry,
             status: "stopped".into(),

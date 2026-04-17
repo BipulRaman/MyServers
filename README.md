@@ -299,6 +299,44 @@ MyServers' built-in static server uses HTTP. However, if your app itself runs HT
 VS multi-startup is IDE-specific and limited to projects within a single solution. MyServers is IDE-agnostic — it manages any project from any framework, and it runs in the background via the system tray even when no IDE is open. It's also useful for running frontend and backend projects that live in separate repos.
 </details>
 
+### Security
+
+<details>
+<summary><strong>Is the dashboard exposed to the network?</strong></summary>
+
+No. MyServers binds exclusively to `127.0.0.1` (localhost). The OS network stack rejects all connections from external machines — other computers on your LAN, Wi-Fi, or the internet cannot reach it. Traffic to `127.0.0.1` never leaves your network interface.
+</details>
+
+<details>
+<summary><strong>Can another app on my machine access the API?</strong></summary>
+
+Yes — any process running on the same machine can send HTTP requests to `http://127.0.0.1:1234`. However, this is not a meaningful security concern: any local process already has the same (or greater) privileges as MyServers. It can directly kill processes, read/write files, and modify your system without needing the MyServers API.
+</details>
+
+<details>
+<summary><strong>Is there authentication on the API?</strong></summary>
+
+No. Since the server only listens on localhost, authentication isn't necessary. The OS-level network boundary (loopback interface) is the security layer. Adding token auth would protect against local cross-origin attacks but is not required for the intended use case — a single-user dev tool on your own machine.
+</details>
+
+<details>
+<summary><strong>What if I change the bind address to 0.0.0.0?</strong></summary>
+
+**Don't** — unless you understand the risk. Binding to `0.0.0.0` exposes all API endpoints to your entire network with no authentication. Anyone on your LAN could start/stop apps, delete configurations, or execute commands via your projects' build steps. If you need remote access, put it behind a reverse proxy with authentication.
+</details>
+
+<details>
+<summary><strong>Can a malicious website trigger requests to localhost:1234?</strong></summary>
+
+Modern browsers enforce CORS — a webpage on a different origin cannot read responses from `localhost:1234`. However, simple POST requests (form submissions) can still be sent cross-origin. Since MyServers only modifies state via JSON `Content-Type` requests, browsers will send a CORS preflight that gets blocked. This provides reasonable protection against cross-site request forgery for typical browser-based attacks.
+</details>
+
+<details>
+<summary><strong>Are environment variables and secrets stored securely?</strong></summary>
+
+Environment variables are stored in plain text in `%APPDATA%\MyServers\apps.json`. Do not put production secrets, API keys, or passwords in the environment variables field. For sensitive values, use your OS credential store or `.env` files in your project directory (which your framework reads directly). MyServers is a local dev tool — treat it accordingly.
+</details>
+
 <details>
 <summary><strong>Can I use this in CI/CD?</strong></summary>
 

@@ -2,7 +2,7 @@ use crate::manager::{AppManager, SavedApp};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum::body::Body;
 use mime_guess::from_path;
@@ -22,6 +22,7 @@ pub async fn run(manager: Arc<AppManager>) {
         .route("/api/apps/:id/start", post(start_app))
         .route("/api/apps/:id/stop", post(stop_app))
         .route("/api/apps/:id/restart", post(restart_app))
+        .route("/api/apps/reorder", post(reorder_apps))
         .route("/api/apps/:id/logs", get(get_logs))
         .route("/api/apps/:id/applogs", get(get_app_logs))
         .route("/api/apps/:id/applogs/export", get(export_app_logs))
@@ -132,9 +133,22 @@ async fn add_app(State(mgr): State<Arc<AppManager>>, Json(body): Json<AppReq>) -
         env_vars: body.env_vars,
         auto_start: body.auto_start,
         script_file: body.script_file,
+        order: 0,
     };
     let id = mgr.add_app(entry);
     ok_id("Added", id)
+}
+
+#[derive(Deserialize)]
+struct ReorderReq {
+    ids: Vec<u32>,
+}
+
+async fn reorder_apps(State(mgr): State<Arc<AppManager>>, Json(body): Json<ReorderReq>) -> impl IntoResponse {
+    match mgr.reorder_apps(body.ids) {
+        Ok(()) => ok("Reordered"),
+        Err(e) => err(&e),
+    }
 }
 
 async fn update_app(State(mgr): State<Arc<AppManager>>, Path(id): Path<u32>, Json(body): Json<AppReq>) -> impl IntoResponse {
@@ -150,6 +164,7 @@ async fn update_app(State(mgr): State<Arc<AppManager>>, Path(id): Path<u32>, Jso
         env_vars: body.env_vars,
         auto_start: body.auto_start,
         script_file: body.script_file,
+        order: 0,
     };
     match mgr.update_app(id, entry) {
         Ok(()) => ok("Updated"),

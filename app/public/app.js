@@ -43,6 +43,7 @@ const IC = {
   logs:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
   edit:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
   trash:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>',
+  drag:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>',
 };
 
 // ─── Presets ────────────────────────────────────────
@@ -54,7 +55,7 @@ async function loadPresets() {
   $type.innerHTML = '';
   presets = {};
   for (const p of list) {
-    presets[p.value] = { build: p.build, port: p.port, env: p.env, serve: p.serve, static: p.static };
+    presets[p.value] = { dev: p.dev, release: p.release };
     const opt = document.createElement('option');
     opt.value = p.value;
     opt.textContent = p.label;
@@ -82,6 +83,7 @@ async function loadApps() {
   }
 
   $list.innerHTML = apps.map(renderRow).join('');
+  initDragAndDrop();
 }
 
 function renderRow(a) {
@@ -94,7 +96,8 @@ function renderRow(a) {
   const run = a.scriptFile ? `Script · ${esc(a.scriptFile)}` : a.staticDir ? `Static · ${esc(a.staticDir)}` : esc(a.runCommand || '');
 
   return `
-  <div class="app-row">
+  <div class="app-row" draggable="true" data-id="${a.id}">
+    <div class="drag-handle" title="Drag to reorder">${IC.drag}</div>
     <div class="status-dot ${st}"></div>
     <div class="app-info">
       <div class="app-name">
@@ -123,6 +126,78 @@ function renderRow(a) {
       <button class="act-btn" onclick="deleteApp(${a.id})">${IC.trash}</button>
     </div>
   </div>`;
+}
+
+// ─── Drag & Drop Reorder ────────────────────────────
+let dragSrcEl = null;
+
+function initDragAndDrop() {
+  const rows = $list.querySelectorAll('.app-row');
+  rows.forEach(row => {
+    row.addEventListener('dragstart', handleDragStart);
+    row.addEventListener('dragover', handleDragOver);
+    row.addEventListener('dragenter', handleDragEnter);
+    row.addEventListener('dragleave', handleDragLeave);
+    row.addEventListener('drop', handleDrop);
+    row.addEventListener('dragend', handleDragEnd);
+  });
+}
+
+function handleDragStart(e) {
+  dragSrcEl = this;
+  this.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', this.dataset.id);
+}
+
+function handleDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const target = this.closest('.app-row');
+  if (!target || target === dragSrcEl) return;
+
+  const rect = target.getBoundingClientRect();
+  const midY = rect.top + rect.height / 2;
+  target.classList.remove('drop-above', 'drop-below');
+  target.classList.add(e.clientY < midY ? 'drop-above' : 'drop-below');
+}
+
+function handleDragEnter(e) {
+  e.preventDefault();
+}
+
+function handleDragLeave() {
+  this.classList.remove('drop-above', 'drop-below');
+}
+
+function handleDrop(e) {
+  e.stopPropagation();
+  e.preventDefault();
+  const target = this.closest('.app-row');
+  if (!target || target === dragSrcEl) return;
+
+  const rect = target.getBoundingClientRect();
+  const before = e.clientY < rect.top + rect.height / 2;
+
+  if (before) {
+    $list.insertBefore(dragSrcEl, target);
+  } else {
+    $list.insertBefore(dragSrcEl, target.nextSibling);
+  }
+
+  target.classList.remove('drop-above', 'drop-below');
+  saveOrder();
+}
+
+function handleDragEnd() {
+  this.classList.remove('dragging');
+  $list.querySelectorAll('.app-row').forEach(r => r.classList.remove('drop-above', 'drop-below'));
+}
+
+async function saveOrder() {
+  const ids = [...$list.querySelectorAll('.app-row')].map(r => +r.dataset.id);
+  const r = await api(`${API}/reorder`, 'POST', { ids });
+  if (r.error) toast(r.error, 'error');
 }
 
 // ─── Actions ────────────────────────────────────────
@@ -158,11 +233,13 @@ async function deleteApp(id) {
 
 // ─── Add / Edit Form ────────────────────────────────
 const $form = document.getElementById('appForm');
-const ids = { id: 'fId', name: 'fName', type: 'fType', dir: 'fDir', serve: 'fServe', port: 'fPort', static: 'fStatic', script: 'fScript', build: 'fBuild', env: 'fEnv', auto: 'fAuto' };
+const ids = { id: 'fId', name: 'fName', type: 'fType', mode: 'fMode', dir: 'fDir', serve: 'fServe', port: 'fPort', static: 'fStatic', script: 'fScript', build: 'fBuild', env: 'fEnv', auto: 'fAuto' };
 const $ = Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, document.getElementById(v)]));
 
 function applyPreset() {
-  const p = presets[$.type.value];
+  const preset = presets[$.type.value];
+  if (!preset) return;
+  const p = preset[$.mode.value] || preset.dev;
   if (!p) return;
   $.build.value = p.build;
   $.port.value = p.port;
@@ -179,6 +256,7 @@ function toggleServe() {
 }
 
 $.type.onchange = () => { if (!$.id.value) applyPreset(); };
+$.mode.onchange = () => { if (!$.id.value) applyPreset(); };
 $.serve.onchange = toggleServe;
 
 document.getElementById('btnAdd').onclick = () => {

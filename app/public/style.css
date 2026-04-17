@@ -91,6 +91,19 @@ body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:
 }
 .app-row:hover{border-color:var(--border-hover);box-shadow:var(--shadow)}
 
+/* Drag handle */
+.drag-handle{
+  width:18px;height:18px;flex-shrink:0;
+  cursor:grab;opacity:.35;transition:opacity var(--transition);
+}
+.drag-handle:active{cursor:grabbing}
+.app-row:hover .drag-handle{opacity:.7}
+
+/* Drag states */
+.app-row.dragging{opacity:.4;border-style:dashed}
+.app-row.drop-above{border-top:2px solid var(--accent)}
+.app-row.drop-below{border-bottom:2px solid var(--accent)}
+
 /* Status indicator */
 .status-dot{
   width:10px;height:10px;border-radius:50%;flex-shrink:0;
