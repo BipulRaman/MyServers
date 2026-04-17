@@ -348,6 +348,8 @@ impl AppManager {
             cmd.stderr(std::process::Stdio::piped());
             #[cfg(windows)]
             { cmd.creation_flags(0x08000000); } // CREATE_NO_WINDOW
+            #[cfg(unix)]
+            apply_unix_session(&mut cmd);
 
             let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
@@ -491,6 +493,8 @@ impl AppManager {
             cmd.stderr(std::process::Stdio::piped());
             #[cfg(windows)]
             { cmd.creation_flags(0x08000200); } // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+            #[cfg(unix)]
+            apply_unix_session(&mut cmd);
 
             let mut child = cmd.spawn().map_err(|e| e.to_string())?;
             let pid = child.id().unwrap_or(0);
@@ -571,6 +575,8 @@ impl AppManager {
         cmd.stderr(std::process::Stdio::piped());
         #[cfg(windows)]
         { cmd.creation_flags(0x08000200); } // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        #[cfg(unix)]
+        apply_unix_session(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let pid = child.id().unwrap_or(0);
@@ -941,6 +947,38 @@ fn kill_tree(pid: u32) {
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("kill").args(["-TERM", "--", &format!("-{}", pid)]).output();
+        // Our spawned children are session leaders (see `apply_unix_session`),
+        // so their PID == their PGID. We send SIGTERM to the whole group so
+        // grandchildren (e.g. `npm → node`, `dotnet → app`) die too, not just
+        // the top-level shell. A short grace period, then SIGKILL anything
+        // still running so nothing is left orphaned when the user stops an app.
+        let pgid = format!("-{}", pid);
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", "--", &pgid])
+            .output();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &pgid])
+            .output();
+    }
+}
+
+/// On Unix, put the child into its own session so it becomes a process-group
+/// leader (PGID == PID). That lets `kill_tree` SIGTERM/SIGKILL the whole tree
+/// via `kill -- -<pid>`. Without this, a `sh -c "npm start"` inherits our PGID
+/// and grandchildren (node, dotnet, etc.) are orphaned when we try to stop it.
+#[cfg(unix)]
+fn apply_unix_session(cmd: &mut tokio::process::Command) {
+    use std::os::unix::process::CommandExt;
+    extern "C" {
+        fn setsid() -> i32;
+    }
+    unsafe {
+        cmd.pre_exec(|| {
+            // Best-effort: if we're already a session leader (very rare for
+            // child processes) setsid returns -1 with EPERM — ignore it.
+            let _ = setsid();
+            Ok(())
+        });
     }
 }

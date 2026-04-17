@@ -298,9 +298,9 @@ async fn get_server_logs(State(mgr): State<Arc<AppManager>>) -> impl IntoRespons
 struct PickResp { path: Option<String> }
 
 async fn pick_folder() -> impl IntoResponse {
-    let path = tokio::task::spawn_blocking(|| {
-        rfd::FileDialog::new().set_title("Select Project Folder").pick_folder().map(|p| p.to_string_lossy().to_string())
-    }).await.unwrap_or(None);
+    let path = tokio::task::spawn_blocking(|| pick_folder_blocking())
+        .await
+        .unwrap_or(None);
     Json(PickResp { path })
 }
 
@@ -309,13 +309,87 @@ struct PickQ { ext: Option<String> }
 
 async fn pick_file(Query(q): Query<PickQ>) -> impl IntoResponse {
     let ext = q.ext.unwrap_or_else(|| "yml".into());
-    let path = tokio::task::spawn_blocking(move || {
-        let mut d = rfd::FileDialog::new().set_title("Select File");
-        if ext == "yml" { d = d.add_filter("YAML", &["yml", "yaml"]); }
-        else if ext == "script" { d = d.add_filter("Scripts", &["ps1", "bat", "cmd", "sh"]); }
-        d.pick_file().map(|p| p.to_string_lossy().to_string())
-    }).await.unwrap_or(None);
+    let path = tokio::task::spawn_blocking(move || pick_file_blocking(&ext))
+        .await
+        .unwrap_or(None);
     Json(PickResp { path })
+}
+
+// --- Platform-specific pickers ----------------------------------------------
+//
+// On Windows and Linux `rfd` works fine from a worker thread. On macOS `rfd`
+// wraps NSOpenPanel, which REQUIRES the main thread and an active
+// NSApplication run loop — neither of which we have in the current headless
+// macOS build. Calling it from a tokio worker panics with:
+//   "You are running RFD in NonWindowed environment, it is impossible to
+//    spawn dialog from thread different than main in this env."
+// So on macOS we shell out to AppleScript (`osascript`), which gives us a
+// real native Finder picker and doesn't care what thread we're on.
+
+#[cfg(not(target_os = "macos"))]
+fn pick_folder_blocking() -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title("Select Project Folder")
+        .pick_folder()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pick_file_blocking(ext: &str) -> Option<String> {
+    let mut d = rfd::FileDialog::new().set_title("Select File");
+    if ext == "yml" {
+        d = d.add_filter("YAML", &["yml", "yaml"]);
+    } else if ext == "script" {
+        d = d.add_filter("Scripts", &["ps1", "bat", "cmd", "sh"]);
+    }
+    d.pick_file().map(|p| p.to_string_lossy().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn pick_folder_blocking() -> Option<String> {
+    run_osascript(
+        r#"try
+    set chosen to choose folder with prompt "Select Project Folder"
+    POSIX path of chosen
+on error number -128
+    return ""
+end try"#,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn pick_file_blocking(ext: &str) -> Option<String> {
+    // Build an `of type {"yml","yaml"}` clause where appropriate so the
+    // Finder picker greys out unrelated files, matching the rfd behavior.
+    let of_type = match ext {
+        "yml" => r#" of type {"yml","yaml"}"#,
+        "script" => r#" of type {"ps1","bat","cmd","sh"}"#,
+        _ => "",
+    };
+    let script = format!(
+        r#"try
+    set chosen to choose file with prompt "Select File"{}
+    POSIX path of chosen
+on error number -128
+    return ""
+end try"#,
+        of_type
+    );
+    run_osascript(&script)
+}
+
+#[cfg(target_os = "macos")]
+fn run_osascript(script: &str) -> Option<String> {
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
 }
 
 // ─── Open path in system explorer / terminal ───────────────────────
@@ -381,16 +455,35 @@ async fn open_terminal(
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            // Try a few common terminals
-            for prog in ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
-                let mut cmd = std::process::Command::new(prog);
-                let spawned = match prog {
-                    "gnome-terminal" => cmd.args(["--working-directory", &dir]).spawn(),
-                    _ => cmd.args(["-e", &format!("bash -c 'cd \"{}\" && exec bash'", dir)]).spawn(),
-                };
-                if spawned.is_ok() { return Ok(()); }
+            // Probe modern + legacy terminal emulators in rough order of
+            // popularity. Each entry is (binary_name, args-factory). We feed
+            // the working directory via each terminal's documented cwd flag
+            // when one exists, and fall back to `bash -c 'cd … && exec bash'`
+            // for old-school terminals that only support `-e`.
+            type Args = Vec<String>;
+            let launchers: [(&str, Box<dyn Fn(&str) -> Args>); 11] = [
+                ("alacritty",        Box::new(|d: &str| vec!["--working-directory".into(), d.into()])),
+                ("kitty",            Box::new(|d: &str| vec!["--directory".into(), d.into()])),
+                ("wezterm",          Box::new(|d: &str| vec!["start".into(), "--cwd".into(), d.into()])),
+                ("foot",             Box::new(|d: &str| vec!["--working-directory".into(), d.into()])),
+                ("tilix",            Box::new(|d: &str| vec!["-w".into(), d.into()])),
+                ("xfce4-terminal",   Box::new(|d: &str| vec![format!("--working-directory={}", d)])),
+                ("gnome-terminal",   Box::new(|d: &str| vec![format!("--working-directory={}", d)])),
+                ("konsole",          Box::new(|d: &str| vec!["--workdir".into(), d.into()])),
+                ("terminator",       Box::new(|d: &str| vec![format!("--working-directory={}", d)])),
+                ("x-terminal-emulator",
+                    // Debian alternatives wrapper; `-e` semantics are least common
+                    // denominator and safe for all backends.
+                    Box::new(|d: &str| vec!["-e".into(), format!("bash -c 'cd \"{}\" && exec bash'", d)])),
+                ("xterm",            Box::new(|d: &str| vec!["-e".into(), format!("bash -c 'cd \"{}\" && exec bash'", d)])),
+            ];
+
+            for (prog, make_args) in &launchers {
+                let args = make_args(&dir);
+                let ok = std::process::Command::new(prog).args(&args).spawn();
+                if ok.is_ok() { return Ok(()); }
             }
-            Err("No terminal emulator found".into())
+            Err("No supported terminal emulator found. Tried: alacritty, kitty, wezterm, foot, tilix, xfce4-terminal, gnome-terminal, konsole, terminator, x-terminal-emulator, xterm.".into())
         }
     }).await.unwrap_or_else(|e| Err(e.to_string()));
     match result { Ok(()) => ok_resp(), Err(e) => err_resp(e) }
@@ -424,6 +517,40 @@ struct GhRelease {
 struct GhAsset {
     name: Option<String>,
     browser_download_url: Option<String>,
+}
+
+/// Returns true if the given GitHub-release asset filename matches the binary
+/// we should offer for download on the current platform. We accept both the
+/// new per-OS naming (`appnest-windows-x86_64.exe`, `appnest-macos-arm64.tar.gz`,
+/// …) and the legacy Windows name (`appnest.exe`) so releases cut before the
+/// cross-platform build landed still resolve for existing Windows users.
+fn is_platform_asset(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    #[cfg(target_os = "windows")]
+    {
+        return n == "appnest.exe" || n == "appnest-windows-x86_64.exe";
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return n == "appnest-linux-x86_64.tar.gz";
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return n == "appnest-macos-arm64.tar.gz";
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        return n == "appnest-macos-x86_64.tar.gz";
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "linux",
+        all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),
+    )))]
+    {
+        let _ = n;
+        false
+    }
 }
 
 fn parse_version(s: &str) -> Vec<u32> {
@@ -476,7 +603,7 @@ async fn check_update() -> Json<UpdateInfo> {
             let asset_url = rel.assets.as_ref().and_then(|assets| {
                 assets.iter().find_map(|a| {
                     let name = a.name.as_deref().unwrap_or("");
-                    if name.eq_ignore_ascii_case("appnest.exe") {
+                    if is_platform_asset(name) {
                         a.browser_download_url.clone()
                     } else { None }
                 })
