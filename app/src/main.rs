@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod manager;
 mod server;
@@ -6,8 +6,6 @@ mod server;
 use manager::AppManager;
 use std::sync::Arc;
 use std::time::Duration;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::TrayIconBuilder;
 
 fn main() {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -25,6 +23,25 @@ fn main() {
     rt_handle.spawn(async move {
         mgr.auto_start_all().await;
     });
+
+    // Give the server a brief moment to bind before launching the browser.
+    std::thread::sleep(Duration::from_millis(250));
+    let _ = open::that("http://localhost:1234");
+
+    #[cfg(target_os = "windows")]
+    run_with_tray(manager, rt_handle);
+
+    #[cfg(not(target_os = "windows"))]
+    run_headless(manager);
+}
+
+// ───────────────────────────── Windows: system tray ─────────────────────────────
+
+#[cfg(target_os = "windows")]
+fn run_with_tray(manager: Arc<AppManager>, rt_handle: tokio::runtime::Handle) {
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::TrayIconBuilder;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     let menu = Menu::new();
     let mi_open = MenuItem::new("Open Dashboard", true, None);
@@ -49,70 +66,42 @@ fn main() {
         .build()
         .expect("Failed to create tray icon");
 
-    let _ = open::that("http://localhost:1234");
-
     let menu_channel = MenuEvent::receiver();
 
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::UI::WindowsAndMessaging::*;
-        loop {
-            unsafe {
-                let mut msg = std::mem::zeroed();
-                let ret = PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE);
-                if ret != 0 {
-                    if msg.message == WM_QUIT {
-                        break;
-                    }
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
+    loop {
+        unsafe {
+            let mut msg = std::mem::zeroed();
+            let ret = PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE);
+            if ret != 0 {
+                if msg.message == WM_QUIT {
+                    break;
                 }
-            }
-
-            while let Ok(event) = menu_channel.try_recv() {
-                if event.id == mi_open.id().clone() {
-                    let _ = open::that("http://localhost:1234");
-                } else if event.id == mi_start_all.id().clone() {
-                    let mgr = manager.clone();
-                    rt_handle.spawn(async move { mgr.start_all().await });
-                } else if event.id == mi_stop_all.id().clone() {
-                    manager.stop_all();
-                } else if event.id == mi_quit.id().clone() {
-                    manager.stop_all();
-                    unsafe {
-                        PostQuitMessage(0);
-                    }
-                }
-            }
-
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        loop {
-            match menu_channel.recv_timeout(Duration::from_millis(100)) {
-                Ok(event) => {
-                    if event.id == mi_open.id().clone() {
-                        let _ = open::that("http://localhost:1234");
-                    } else if event.id == mi_start_all.id().clone() {
-                        let mgr = manager.clone();
-                        rt_handle.spawn(async move { mgr.start_all().await });
-                    } else if event.id == mi_stop_all.id().clone() {
-                        manager.stop_all();
-                    } else if event.id == mi_quit.id().clone() {
-                        manager.stop_all();
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(_) => break,
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
         }
+
+        while let Ok(event) = menu_channel.try_recv() {
+            if event.id == mi_open.id().clone() {
+                let _ = open::that("http://localhost:1234");
+            } else if event.id == mi_start_all.id().clone() {
+                let mgr = manager.clone();
+                rt_handle.spawn(async move { mgr.start_all().await });
+            } else if event.id == mi_stop_all.id().clone() {
+                manager.stop_all();
+            } else if event.id == mi_quit.id().clone() {
+                manager.stop_all();
+                unsafe {
+                    PostQuitMessage(0);
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
+#[cfg(target_os = "windows")]
 fn create_tray_icon() -> tray_icon::Icon {
     let s = 32u32;
     let mut rgba = vec![0u8; (s * s * 4) as usize];
@@ -145,4 +134,36 @@ fn create_tray_icon() -> tray_icon::Icon {
         }
     }
     tray_icon::Icon::from_rgba(rgba, s, s).expect("Failed to create icon")
+}
+
+// ───────────────────────────── macOS / Linux: headless ─────────────────────────────
+
+#[cfg(not(target_os = "windows"))]
+fn run_headless(manager: Arc<AppManager>) {
+    // Block until SIGINT / SIGTERM, then stop all managed processes so we don't
+    // leave dev servers orphaned.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create signal runtime");
+
+    rt.block_on(async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+            let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+            tokio::select! {
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    });
+
+    eprintln!("AppNest: shutting down, stopping managed apps…");
+    manager.stop_all();
 }

@@ -15,14 +15,36 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-gnu
+            artifact_name: appnest-windows-x86_64
+            binary: appnest.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: appnest-linux-x86_64
+            binary: appnest
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: appnest-macos-arm64
+            binary: appnest
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact_name: appnest-macos-x86_64
+            binary: appnest
+
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Generate build number
-        id: buildnum
+      - name: Generate build number (Windows)
+        if: runner.os == 'Windows'
+        id: buildnum_win
         shell: pwsh
         run: |
           $count = (git rev-list --count HEAD)
@@ -30,14 +52,24 @@ jobs:
           $tag = "v1.0.$count"
           echo "BUILD_TAG=$tag" >> $env:GITHUB_ENV
           echo "BUILD_LABEL=$tag+$sha" >> $env:GITHUB_ENV
-          echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
-      - name: Install Rust (GNU toolchain)
+      - name: Generate build number (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          count=$(git rev-list --count HEAD)
+          sha=$(git rev-parse --short HEAD)
+          tag="v1.0.$count"
+          echo "BUILD_TAG=$tag" >> "$GITHUB_ENV"
+          echo "BUILD_LABEL=$tag+$sha" >> "$GITHUB_ENV"
+
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-gnu
+          targets: ${{ matrix.target }}
 
-      - name: Stamp Cargo.toml version
+      - name: Stamp Cargo.toml version (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ver = "${{ env.BUILD_TAG }}".TrimStart('v')
@@ -46,10 +78,31 @@ jobs:
           $updated = [regex]::Replace($content, '(?m)^version\s*=\s*"[^"]+"', "version = `"$ver`"", 1)
           Set-Content -Path $path -Value $updated -NoNewline
           Write-Host "Stamped version: $ver"
-          Select-String -Path $path -Pattern '^version' | Select-Object -First 1
 
-      - name: Install MinGW
+      - name: Stamp Cargo.toml version (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ver="${BUILD_TAG#v}"
+          # Replace the first `version = "..."` line in app/Cargo.toml.
+          # Use a temp file so this works on both GNU sed (Linux) and BSD sed (macOS).
+          awk -v ver="$ver" '
+            !done && /^version[[:space:]]*=/ { print "version = \"" ver "\""; done=1; next }
+            { print }
+          ' app/Cargo.toml > app/Cargo.toml.new
+          mv app/Cargo.toml.new app/Cargo.toml
+          echo "Stamped version: $ver"
+          grep '^version' app/Cargo.toml | head -n1
+
+      - name: Install MinGW (Windows)
+        if: runner.os == 'Windows'
         run: choco install mingw -y
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -58,28 +111,44 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             app/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('app/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('app/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Build release
         working-directory: app
-        run: cargo build --release --target x86_64-pc-windows-gnu
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Prepare artifact
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist
-          Copy-Item app/target/x86_64-pc-windows-gnu/release/appnest.exe dist/appnest.exe
+          Copy-Item "app/target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.binary }}"
+
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "app/target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.binary }}"
+          chmod +x "dist/${{ matrix.binary }}"
+          # Ship a .tar.gz for Unix releases so the +x bit survives.
+          tar -C dist -czf "dist/${{ matrix.artifact_name }}.tar.gz" "${{ matrix.binary }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: appnest-windows
-          path: dist/appnest.exe
+          name: ${{ matrix.artifact_name }}
+          path: |
+            dist/${{ matrix.binary }}
+            dist/*.tar.gz
 
-      - name: Create GitHub Release
+      - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.BUILD_TAG }}
           name: ${{ env.BUILD_TAG }}
-          files: dist/appnest.exe
+          files: |
+            dist/${{ matrix.binary }}
+            dist/*.tar.gz
           generate_release_notes: true

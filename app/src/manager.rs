@@ -131,14 +131,12 @@ pub struct AppManager {
 
 impl AppManager {
     pub fn new(rt_handle: Handle) -> Self {
-        let app_data = std::env::var("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-                    .unwrap_or_else(|| std::env::current_dir().unwrap())
-            });
+        let app_data = default_data_root().unwrap_or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| std::env::current_dir().unwrap())
+        });
 
         let base_dir = app_data.join("AppNest");
         let data_file = base_dir.join("apps.json");
@@ -775,8 +773,51 @@ fn local_timestamp() -> String {
     #[cfg(not(windows))]
     {
         use std::time::SystemTime;
-        let s = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-        format!("{}", s)
+        // POSIX `struct tm` (fields we need). `localtime_r` fills it in the
+        // process's local timezone. The trailing fields (gmtoff, zone) differ
+        // across platforms but we only read the leading ones, so this is safe
+        // as long as we pass a fully-zeroed buffer of the right size.
+        #[repr(C)]
+        struct Tm {
+            sec: i32,
+            min: i32,
+            hour: i32,
+            mday: i32,
+            mon: i32,
+            year: i32,
+            wday: i32,
+            yday: i32,
+            isdst: i32,
+            // Padding for gmtoff + zone on glibc/musl/macOS (largest we need).
+            _pad: [u8; 32],
+        }
+        extern "C" {
+            fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+        }
+
+        let secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut tm = Tm {
+            sec: 0, min: 0, hour: 0, mday: 0, mon: 0, year: 0,
+            wday: 0, yday: 0, isdst: 0, _pad: [0; 32],
+        };
+        let ok = unsafe { !localtime_r(&secs, &mut tm).is_null() };
+        if ok {
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                tm.year + 1900,
+                tm.mon + 1,
+                tm.mday,
+                tm.hour,
+                tm.min,
+                tm.sec,
+            )
+        } else {
+            // Fallback: epoch seconds if libc call somehow failed.
+            format!("{}", secs)
+        }
     }
 }
 
@@ -822,8 +863,9 @@ fn build_env(entry: &SavedApp) -> HashMap<String, String> {
     // Add npm global bin (where global packages like tsc might be)
     let global_prefix = npm_global_prefix();
     if !global_prefix.is_empty() {
-        extra_paths.push(global_prefix.to_string());
-        extra_paths.push(format!("{}\\node_modules\\.bin", global_prefix));
+        let prefix_path = Path::new(global_prefix);
+        extra_paths.push(prefix_path.to_string_lossy().to_string());
+        extra_paths.push(prefix_path.join("node_modules").join(".bin").to_string_lossy().to_string());
     }
 
     // Find all PATH-like keys (Windows is case-insensitive but HashMap isn't)
@@ -832,7 +874,8 @@ fn build_env(entry: &SavedApp) -> HashMap<String, String> {
         .cloned()
         .unwrap_or_else(|| "PATH".to_string());
     let existing = env.get(&path_key).cloned().unwrap_or_default();
-    let new_path = format!("{};{}", extra_paths.join(";"), existing);
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let new_path = format!("{}{}{}", extra_paths.join(sep), sep, existing);
     env.insert(path_key, new_path);
 
     if let Some(port) = entry.port {
@@ -855,6 +898,30 @@ fn stop_runtime(app: &mut AppRuntime) {
     }
     app.status = "stopped".into();
     app.started_at = None;
+}
+
+/// Resolve the per-user directory where AppNest should store its config and logs.
+/// Windows: %APPDATA% (e.g. C:\Users\<you>\AppData\Roaming)
+/// macOS:   ~/Library/Application Support
+/// Linux:   $XDG_DATA_HOME or ~/.local/share
+fn default_data_root() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Library").join("Application Support"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            Some(PathBuf::from(xdg))
+        } else {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
+        }
+    }
 }
 
 fn now_secs() -> u64 {

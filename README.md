@@ -4,7 +4,7 @@ A developer productivity tool for managing and hosting local web applications. B
 
 Stop juggling terminals. One app to build, host, and watch them all.
 
-**Single ~2 MB executable. No runtime dependencies. System tray integration. Built with Rust.**
+**Single small native executable. No runtime dependencies. System tray on Windows. Built with Rust — runs on Windows, macOS, and Linux.**
 
 ---
 
@@ -68,12 +68,12 @@ For React, Angular, and Vue apps, select **Static Folder** as serve mode and poi
 ## Prerequisites
 
 ### To run (end users)
-- Windows 10/11 (64-bit)
+- **Windows 10/11 (64-bit)**, **macOS 12+** (Intel or Apple Silicon), or a modern **Linux** desktop (x86_64)
 - No other dependencies — it's a self-contained executable
 
 ### To build from source
 - **Rust** (stable) — [Install via rustup](https://rustup.rs)
-- **MSYS2 + MinGW** — for the GNU toolchain on Windows
+- **Windows:** MSYS2 + MinGW for the GNU toolchain
   ```
   winget install MSYS2.MSYS2
   ```
@@ -81,28 +81,53 @@ For React, Angular, and Vue apps, select **Static Folder** as serve mode and poi
   ```
   pacman -S mingw-w64-x86_64-gcc
   ```
-- **Rust GNU target** (if not default):
+  And set the GNU target:
   ```
   rustup default stable-x86_64-pc-windows-gnu
+  ```
+- **macOS:** Xcode Command Line Tools (`xcode-select --install`)
+- **Linux:** a C toolchain and GTK 3 dev headers (for the native file-dialog crate):
+  ```
+  # Debian / Ubuntu
+  sudo apt install build-essential libgtk-3-dev
+  # Fedora
+  sudo dnf install @development-tools gtk3-devel
+  # Arch
+  sudo pacman -S base-devel gtk3
   ```
 
 ## Building
 
+**Windows (PowerShell):**
 ```powershell
 cd app
 $env:PATH = "C:\msys64\mingw64\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
 cargo build --release
 ```
 
+**macOS / Linux:**
+```bash
+cd app
+cargo build --release
+```
+
 ### Build Output
 
-The only file you need from the build:
+| Platform | Binary |
+|----------|--------|
+| Windows  | `app/target/release/appnest.exe` |
+| macOS    | `app/target/release/appnest` |
+| Linux    | `app/target/release/appnest` |
 
-```
-app\target\release\AppNest.exe    (≈2 MB)
-```
+That's it — **single file, no DLLs, no config files, no supporting files**. The HTML, CSS, and JS are compiled into the binary. Copy the binary anywhere and run it.
 
-That's it — **single file, no DLLs, no config files, no supporting files**. The HTML, CSS, and JS are compiled into the binary. Copy the exe anywhere and run it. App data is created automatically at `%APPDATA%\AppNest\` on first launch.
+App data is created automatically on first launch under:
+
+| Platform | Location |
+|----------|----------|
+| Windows  | `%APPDATA%\AppNest\` |
+| macOS    | `~/Library/Application Support/AppNest/` |
+| Linux    | `$XDG_DATA_HOME/AppNest/` (falls back to `~/.local/share/AppNest/`) |
 
 ## Project Structure
 
@@ -259,7 +284,9 @@ PM2 is Node.js-specific and requires Node.js to be installed. AppNest manages an
 <details>
 <summary><strong>What about Linux and macOS support?</strong></summary>
 
-Currently Windows-only. The system tray integration and file dialogs use Windows APIs. Cross-platform support is on the roadmap but not available yet. If you develop on Linux/macOS, this tool isn't for you right now.
+AppNest runs on **Windows, macOS, and Linux**. The dashboard, process manager, static server, log streaming, native file dialogs, and "open folder / terminal" all work on every platform.
+
+One small difference: the background **system tray icon** is currently Windows-only. On macOS and Linux, AppNest opens the dashboard in your browser and runs in the foreground — press `Ctrl+C` in the terminal (or use the OS's Activity Monitor / `kill`) to quit, which will cleanly stop every managed app first. A proper tray integration for macOS/Linux is a natural next step.
 </details>
 
 <details>
