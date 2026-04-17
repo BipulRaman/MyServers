@@ -3,6 +3,7 @@ let pollTimer = null, currentLogId = null, currentLogTab = 'run';
 let searchQuery = '';
 let statusFilter = 'all'; // 'all' | 'running' | 'stopped'
 const expandedPreviews = new Set(); // ids whose inline preview is open
+const pendingStart = new Set(); // ids where a start/restart has been fired and we're waiting for status to flip
 let previewTimer = null;
 
 // ─── Persisted UI state ───────────────────
@@ -68,6 +69,8 @@ const IC = {
   tail:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>',
   ext:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>',
   edit:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
+  copy:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  spinner: '<svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>',
   trash:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>',
   drag:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>',
 };
@@ -95,6 +98,15 @@ const $list = document.getElementById('appList');
 async function loadApps() {
   const apps = await api(API);
 
+  // Clear "pending start" flags once backend confirms the transition
+  if (pendingStart.size) {
+    for (const a of apps) {
+      if (pendingStart.has(a.id) && (a.building || a.status === 'running')) {
+        pendingStart.delete(a.id);
+      }
+    }
+  }
+
   const running = apps.filter(a => a.status === 'running').length;
   document.getElementById('statRunning').textContent = running;
   document.getElementById('statStopped').textContent = apps.length - running;
@@ -110,11 +122,110 @@ async function loadApps() {
     return;
   }
 
-  $list.innerHTML = apps.map(renderRow).join('');
+  // If the list was empty (or contained empty-state), seed it fresh
+  if (!$list.querySelector('.row-wrap')) {
+    $list.innerHTML = apps.map(renderRow).join('');
+    applySearchFilter();
+    initDragAndDrop();
+    for (const id of expandedPreviews) refreshPreview(id);
+    return;
+  }
+
+  // Keyed diff update — avoid rebuilding the whole DOM each tick (no flicker)
+  const existing = new Map();
+  $list.querySelectorAll('.row-wrap').forEach(w => {
+    existing.set(Number(w.dataset.wrapId), w);
+  });
+
+  const seen = new Set();
+  let prev = null;
+  for (const a of apps) {
+    seen.add(a.id);
+    const cur = existing.get(a.id);
+    const sig = rowSignature(a);
+    if (cur) {
+      if (cur.dataset.sig !== sig) {
+        // Replace only the .app-row inside, keep wrapper + preview element
+        const tmp = document.createElement('div');
+        tmp.innerHTML = renderRow(a).trim();
+        const freshWrap = tmp.firstElementChild;
+        const freshRow = freshWrap.querySelector('.app-row');
+        const oldRow = cur.querySelector('.app-row');
+        if (oldRow && freshRow) cur.replaceChild(freshRow, oldRow);
+        cur.className = freshWrap.className; // keep expanded class if any already on cur
+        if (expandedPreviews.has(a.id)) cur.classList.add('expanded');
+        cur.dataset.sig = sig;
+      } else {
+        // Same signature — just refresh the live uptime text in place
+        updateUptimeInRow(cur, a);
+      }
+      // Reorder if needed without detaching when already in correct spot
+      const expectedNext = prev ? prev.nextSibling : $list.firstChild;
+      if (expectedNext !== cur) $list.insertBefore(cur, expectedNext);
+      prev = cur;
+    } else {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = renderRow(a).trim();
+      const wrap = tmp.firstElementChild;
+      wrap.dataset.sig = sig;
+      const expectedNext = prev ? prev.nextSibling : $list.firstChild;
+      $list.insertBefore(wrap, expectedNext);
+      prev = wrap;
+    }
+  }
+  // Remove rows that no longer exist
+  for (const [id, node] of existing) {
+    if (!seen.has(id)) node.remove();
+  }
+
   applySearchFilter();
   initDragAndDrop();
-  // Refresh any open inline previews immediately
   for (const id of expandedPreviews) refreshPreview(id);
+}
+
+function rowSignature(a) {
+  const st = a.building ? 'building' : a.status;
+  return [
+    st, a.name, a.type, a.projectDir, a.port || '', a.pid || '',
+    a.autoStart ? '1' : '0', a.staticDir || '', a.scriptFile || '',
+    pendingStart.has(a.id) ? 'P' : ''
+  ].join('|');
+}
+
+function updateUptimeInRow(wrap, a) {
+  const meta = wrap.querySelector('.app-meta');
+  if (!meta) return;
+  const isUp = (a.building ? 'building' : a.status) === 'running';
+  const existing = meta.querySelector('.uptime');
+  if (isUp && a.uptimeSeconds != null) {
+    const txt = formatUptime(a.uptimeSeconds);
+    if (existing) {
+      if (existing.textContent !== txt) existing.textContent = txt;
+    } else {
+      const span = document.createElement('span');
+      span.className = 'uptime';
+      span.title = 'Uptime';
+      span.textContent = txt;
+      // Insert before the project-dir span
+      const dir = meta.querySelector('.app-dir');
+      meta.insertBefore(span, dir);
+    }
+  } else if (existing) {
+    existing.remove();
+  }
+}
+
+function formatUptime(sec) {
+  if (!sec || sec < 0) return '';
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  if (h < 24) return mm ? `${h}h ${mm}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const hh = h % 24;
+  return hh ? `${d}d ${hh}h` : `${d}d`;
 }
 
 function renderRow(a) {
@@ -128,13 +239,15 @@ function renderRow(a) {
 
   const portHtml = a.port
     ? (isUp
-        ? `<a class="port-chip is-live" href="http://localhost:${a.port}" target="_blank" rel="noopener" title="Open in browser" onclick="event.stopPropagation()">Port <b>${a.port}</b>${IC.ext}</a>`
+        ? `<a class="port-chip is-live" href="http://localhost:${a.port}" target="_blank" rel="noopener" title="Left-click: open · Right-click: copy URL" onclick="event.stopPropagation()" oncontextmenu="return copyPortUrl(event, ${a.port})">Port <b>${a.port}</b>${IC.ext}</a>`
         : `<span class="port-chip">Port <b>${a.port}</b></span>`)
     : '';
 
   const tailBtn = (isUp || isBuild)
     ? `<button class="act-btn ${expandedPreviews.has(a.id) ? 'is-active' : ''}" onclick="togglePreview(${a.id})" title="Quick log preview">${IC.tail}</button>`
     : '';
+
+  const uptime = isUp && a.uptimeSeconds != null ? formatUptime(a.uptimeSeconds) : '';
 
   return `
   <div class="${wrapClass}" data-wrap-id="${a.id}">
@@ -151,26 +264,40 @@ function renderRow(a) {
         <span><span class="meta-label">${esc(a.type)}</span></span>
         ${portHtml}
         ${a.pid ? `<span>PID <b>${a.pid}</b></span>` : ''}
+        ${uptime ? `<span class="uptime" title="Uptime">${uptime}</span>` : ''}
         <span class="app-dir" title="${esc(a.projectDir)}">${esc(a.projectDir)}</span>
       </div>
     </div>
     <div class="app-actions">
-      ${!isUp && !isBuild ? `
+      ${!isUp && !isBuild ? (pendingStart.has(a.id) ? `
+        <button class="act-btn act-start is-pending" disabled>${IC.spinner || IC.play} Starting…</button>
+      ` : `
         <button class="act-btn act-start" onclick="startApp(${a.id})">${IC.play} Start</button>
         <button class="act-btn" onclick="startApp(${a.id},true)" title="Start without build">${IC.play}</button>
-      ` : ''}
+      `) : ''}
       ${isUp ? `
         <button class="act-btn act-stop" onclick="stopApp(${a.id})">${IC.stop} Stop</button>
-        <button class="act-btn" onclick="restartApp(${a.id})">${IC.restart}</button>
+        <button class="act-btn" onclick="restartApp(${a.id})" ${pendingStart.has(a.id) ? 'disabled' : ''}>${IC.restart}</button>
       ` : ''}
       ${tailBtn}
       <button class="act-btn" onclick="showLogs(${a.id},'${esc(a.name)}')">${IC.logs}</button>
-      <button class="act-btn" onclick="editApp(${a.id})">${IC.edit}</button>
-      <button class="act-btn" onclick="deleteApp(${a.id})">${IC.trash}</button>
+      <button class="act-btn" onclick="editApp(${a.id})" title="Edit">${IC.edit}</button>
+      <button class="act-btn" onclick="duplicateApp(${a.id})" title="Duplicate">${IC.copy}</button>
+      <button class="act-btn" onclick="deleteApp(${a.id})" title="Remove">${IC.trash}</button>
     </div>
   </div>
   <div class="log-preview" id="preview-${a.id}"><span class="empty">Loading…</span></div>
   </div>`;
+}
+
+function copyPortUrl(e, port) {
+  e.preventDefault();
+  e.stopPropagation();
+  const url = `http://localhost:${port}`;
+  navigator.clipboard.writeText(url)
+    .then(() => toast('Copied URL: ' + url, 'success'))
+    .catch(() => toast('Copy failed', 'error'));
+  return false;
 }
 
 // ─── Search ----------------------------------------
@@ -261,8 +388,26 @@ async function saveOrder() {
 
 // ─── Actions ────────────────────────────────────────
 async function startApp(id, skip) {
-  const r = await api(`${API}/${id}/start${skip ? '?skipBuild=true' : ''}`, 'POST');
-  r.error ? toast(r.error, 'error') : toast('Started', 'success');
+  if (pendingStart.has(id)) return; // already waiting
+  pendingStart.add(id);
+  // Re-render the affected row right away so the button flips to "Starting…"
+  updateRowPendingUI(id);
+  // Safety net: clear pending after 20s if backend never transitions
+  setTimeout(() => {
+    if (pendingStart.has(id)) { pendingStart.delete(id); loadApps(); }
+  }, 20000);
+  try {
+    const r = await api(`${API}/${id}/start${skip ? '?skipBuild=true' : ''}`, 'POST');
+    if (r.error) {
+      pendingStart.delete(id);
+      toast(r.error, 'error');
+    } else {
+      toast('Starting…', 'success');
+    }
+  } catch (e) {
+    pendingStart.delete(id);
+    toast(String(e), 'error');
+  }
   loadApps();
 }
 
@@ -273,9 +418,41 @@ async function stopApp(id) {
 }
 
 async function restartApp(id) {
-  const r = await api(`${API}/${id}/restart`, 'POST');
-  r.error ? toast(r.error, 'error') : toast('Restarted', 'success');
+  if (pendingStart.has(id)) return;
+  pendingStart.add(id);
+  updateRowPendingUI(id);
+  setTimeout(() => {
+    if (pendingStart.has(id)) { pendingStart.delete(id); loadApps(); }
+  }, 20000);
+  try {
+    const r = await api(`${API}/${id}/restart`, 'POST');
+    if (r.error) {
+      pendingStart.delete(id);
+      toast(r.error, 'error');
+    } else {
+      toast('Restarting…', 'success');
+    }
+  } catch (e) {
+    pendingStart.delete(id);
+    toast(String(e), 'error');
+  }
   loadApps();
+}
+
+function updateRowPendingUI(id) {
+  const wrap = $list.querySelector(`.row-wrap[data-wrap-id="${id}"]`);
+  if (!wrap) return;
+  // Disable every button in the actions area; mark the Start button visually
+  wrap.querySelectorAll('.app-actions .act-btn').forEach(btn => {
+    btn.disabled = true;
+  });
+  const startBtn = wrap.querySelector('.act-start');
+  if (startBtn) {
+    startBtn.classList.add('is-pending');
+    startBtn.innerHTML = (IC.spinner || IC.play) + ' Starting…';
+  }
+  // Invalidate cached signature so the next diff will fully re-render
+  wrap.dataset.sig = '';
 }
 
 async function deleteApp(id) {
@@ -360,6 +537,31 @@ async function editApp(id) {
   $.name.focus();
 }
 
+async function duplicateApp(id) {
+  const apps = await api(API);
+  const a = apps.find(x => x.id === id);
+  if (!a) return;
+  // Pre-fill form but with empty id (creates a new one on save)
+  $.id.value = '';
+  $.name.value = a.name + ' (copy)';
+  $.dir.value = a.projectDir;
+  $.type.value = a.type;
+  $.port.value = a.port ? (a.port + 1) : '';
+  const buildLines = (a.buildSteps || []).slice();
+  if (a.runCommand) buildLines.push(a.runCommand);
+  $.build.value = buildLines.join('\n');
+  $.static.value = a.staticDir || '';
+  $.serve.value = a.scriptFile ? 'script' : a.staticDir ? 'static' : 'command';
+  $.script.value = a.scriptFile || '';
+  $.env.value = Object.entries(a.envVars || {}).map(([k, v]) => `${k}=${v}`).join('\n');
+  $.auto.checked = false; // don't auto-start duplicates
+  toggleServe();
+  document.getElementById('modalTitle').textContent = 'Duplicate Application';
+  document.getElementById('modal').classList.remove('hidden');
+  $.name.focus();
+  $.name.select();
+}
+
 function parseEnv(text) {
   const env = {};
   for (const line of text.split('\n')) {
@@ -407,12 +609,19 @@ $form.onsubmit = async (e) => {
 // ─── Logs ───────────────────────────────────────────
 let logStream = null;
 let runBuf = '', buildBuf = '';
+let logSearchQuery = '';
+let followMode = true;
 
 async function showLogs(id, name) {
   currentLogId = id;
   currentLogTab = 'run';
   runBuf = '';
   buildBuf = '';
+  logSearchQuery = '';
+  followMode = true;
+  const $searchInput = document.getElementById('logSearchInput');
+  if ($searchInput) $searchInput.value = '';
+  updateFollowPill();
   document.getElementById('logTitle').textContent = name;
   document.getElementById('logModal').classList.remove('hidden');
   updateTabs();
@@ -479,35 +688,133 @@ function stripAnsi(s) {
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
 }
 
+// ANSI SGR (color / style) -> HTML with classes.
+// Preserves colors, strips all other escape sequences.
+const ANSI_COLOR_MAP = {
+  30: 'ansi-black', 31: 'ansi-red', 32: 'ansi-green', 33: 'ansi-yellow',
+  34: 'ansi-blue', 35: 'ansi-magenta', 36: 'ansi-cyan', 37: 'ansi-white',
+  90: 'ansi-bright-black', 91: 'ansi-bright-red', 92: 'ansi-bright-green', 93: 'ansi-bright-yellow',
+  94: 'ansi-bright-blue', 95: 'ansi-bright-magenta', 96: 'ansi-bright-cyan', 97: 'ansi-bright-white',
+};
+function ansiToHtml(input) {
+  // First remove non-SGR escapes (OSC, DCS, C1, etc.) and control chars
+  const cleaned = String(input)
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')
+    .replace(/\x1b[PX^_][^\x1b]*\x1b\\/g, '')
+    .replace(/\x1b[=>]/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+  let html = '';
+  let open = 0; // number of currently-open spans
+  const sgrRe = /\x1b\[([0-9;]*)m/g;
+  let last = 0;
+  let m;
+  const closeAll = () => { while (open > 0) { html += '</span>'; open--; } };
+
+  while ((m = sgrRe.exec(cleaned)) !== null) {
+    // Emit escaped text up to this escape
+    if (m.index > last) html += esc(cleaned.slice(last, m.index));
+    const codes = m[1] === '' ? [0] : m[1].split(';').map(Number);
+    for (const code of codes) {
+      if (code === 0) { closeAll(); continue; }
+      let cls = null;
+      if (code === 1) cls = 'ansi-bold';
+      else if (code === 2) cls = 'ansi-dim';
+      else if (code === 3) cls = 'ansi-italic';
+      else if (code === 4) cls = 'ansi-underline';
+      else if (ANSI_COLOR_MAP[code]) cls = ANSI_COLOR_MAP[code];
+      // 39 = default fg, 22 = normal intensity, etc. -> close all to be safe
+      else if (code === 39 || code === 22 || code === 23 || code === 24) { closeAll(); continue; }
+      if (cls) { html += `<span class="${cls}">`; open++; }
+    }
+    last = sgrRe.lastIndex;
+  }
+  if (last < cleaned.length) html += esc(cleaned.slice(last));
+  closeAll();
+  // Strip any CSI sequences that weren't SGR (cursor moves etc.) from the final HTML just in case
+  html = html.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+  return html;
+}
+
 function linkifyUrls(text) {
-  const urlRe = /(https?:\/\/[^\s]+)/;
-  return stripAnsi(text).split('\n').map(raw => {
-    const cls = classifyLine(raw);
-    const parts = raw.split(/(https?:\/\/[^\s]+)/g);
-    let h = parts.map(p => urlRe.test(p)
-      ? `<a class="log-url" href="${p.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" target="_blank" rel="noopener">${esc(p)}</a>`
-      : esc(p)
-    ).join('');
+  // Convert ANSI first to get HTML with colored spans + escaped text;
+  // then process line-by-line to add per-line classification, URL links, timestamp styling.
+  const ansiHtml = ansiToHtml(text);
+  const urlRe = /(https?:\/\/[^\s<]+)/;
+  return ansiHtml.split('\n').map(line => {
+    const plain = line.replace(/<[^>]*>/g, ''); // for classification only
+    const cls = classifyLine(plain);
+    let h = line.replace(/(https?:\/\/[^\s<]+)/g, (u) => {
+      const safe = u.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      return `<a class="log-url" href="${safe}" target="_blank" rel="noopener">${u}</a>`;
+    });
     h = h.replace(/(\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\])/g, '<span class="log-ts">$1</span>');
     return cls ? `<span class="${cls}">${h}</span>` : h;
   }).join('\n');
 }
 
+function getBufFor(tab) {
+  if (tab === 'build') return buildBuf;
+  return runBuf;
+}
+
+function applyLogFilter(raw) {
+  const q = (logSearchQuery || '').trim();
+  if (!q) return raw;
+  const qLower = q.toLowerCase();
+  return raw.split('\n').filter(l => l.toLowerCase().includes(qLower)).join('\n');
+}
+
+function highlightMatches($el, q) {
+  if (!q) { document.getElementById('logSearchCount').textContent = ''; return; }
+  const qLower = q.toLowerCase();
+  // Walk text nodes inside the terminal and wrap matches in <mark>
+  const walker = document.createTreeWalker($el, NodeFilter.SHOW_TEXT, null);
+  const targets = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    if (node.parentElement && node.parentElement.closest('mark.log-match')) continue;
+    const idx = node.nodeValue.toLowerCase().indexOf(qLower);
+    if (idx !== -1) targets.push(node);
+  }
+  let count = 0;
+  targets.forEach(n => {
+    const text = n.nodeValue;
+    const parent = n.parentNode;
+    const frag = document.createDocumentFragment();
+    let from = 0;
+    let pos = text.toLowerCase().indexOf(qLower, from);
+    while (pos !== -1) {
+      if (pos > from) frag.appendChild(document.createTextNode(text.slice(from, pos)));
+      const mark = document.createElement('mark');
+      mark.className = 'log-match';
+      mark.textContent = text.slice(pos, pos + q.length);
+      frag.appendChild(mark);
+      count++;
+      from = pos + q.length;
+      pos = text.toLowerCase().indexOf(qLower, from);
+    }
+    if (from < text.length) frag.appendChild(document.createTextNode(text.slice(from)));
+    parent.replaceChild(frag, n);
+  });
+  document.getElementById('logSearchCount').textContent = count > 0 ? `${count} matches` : 'no matches';
+}
+
 function renderStreamedLogs() {
   const $el = document.getElementById('logContent');
   if (!$el) return;
-  const wasAtBottom = $el.scrollHeight - $el.scrollTop - $el.clientHeight < 30;
   const raw = currentLogTab === 'run'
     ? (runBuf || '(waiting for output…)')
     : (buildBuf || '(no build output)');
-  $el.innerHTML = linkifyUrls(raw);
-  if (wasAtBottom) $el.scrollTop = $el.scrollHeight;
+  const filtered = applyLogFilter(raw);
+  $el.innerHTML = linkifyUrls(filtered);
+  highlightMatches($el, logSearchQuery);
+  if (followMode) $el.scrollTop = $el.scrollHeight;
 }
 
 async function refreshLogs() {
   if (!currentLogId) return;
   const $el = document.getElementById('logContent');
-  const wasAtBottom = $el.scrollHeight - $el.scrollTop - $el.clientHeight < 30;
   let raw;
   if (currentLogTab === 'applog') {
     const d = await api(`${API}/${currentLogId}/applogs`);
@@ -518,9 +825,42 @@ async function refreshLogs() {
       ? (d.logs || '(waiting for output…)')
       : (d.buildLogs || '(no build output)');
   }
-  $el.innerHTML = linkifyUrls(raw);
-  if (wasAtBottom) $el.scrollTop = $el.scrollHeight;
+  const filtered = applyLogFilter(raw);
+  $el.innerHTML = linkifyUrls(filtered);
+  highlightMatches($el, logSearchQuery);
+  if (followMode) $el.scrollTop = $el.scrollHeight;
 }
+
+function updateFollowPill() {
+  const pill = document.getElementById('followPill');
+  if (!pill) return;
+  pill.classList.toggle('is-following', followMode);
+  pill.classList.toggle('is-paused', !followMode);
+  pill.textContent = followMode ? 'Following' : 'Paused';
+  pill.title = followMode ? 'Auto-scrolling. Click to pause.' : 'Scroll paused. Click to resume.';
+}
+
+// Follow pill + scroll-based auto toggle
+(function() {
+  const pill = document.getElementById('followPill');
+  const $el = document.getElementById('logContent');
+  if (pill) pill.onclick = () => {
+    followMode = !followMode;
+    updateFollowPill();
+    if (followMode && $el) $el.scrollTop = $el.scrollHeight;
+  };
+  if ($el) $el.addEventListener('scroll', () => {
+    const atBottom = $el.scrollHeight - $el.scrollTop - $el.clientHeight < 10;
+    if (!atBottom && followMode) { followMode = false; updateFollowPill(); }
+    else if (atBottom && !followMode) { followMode = true; updateFollowPill(); }
+  });
+  const $search = document.getElementById('logSearchInput');
+  if ($search) $search.addEventListener('input', e => {
+    logSearchQuery = e.target.value;
+    if (currentLogTab === 'applog') refreshLogs();
+    else renderStreamedLogs();
+  });
+})();
 
 document.querySelectorAll('.tab-bar .tab').forEach(b => {
   b.onclick = () => {

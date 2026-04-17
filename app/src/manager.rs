@@ -87,6 +87,7 @@ struct AppRuntime {
     logs: LogSink,
     build_logs: LogSink,
     log_tx: tokio::sync::broadcast::Sender<LogLine>,
+    started_at: Option<u64>, // unix seconds when entered "running"
 }
 
 struct ManagerState {
@@ -115,6 +116,8 @@ pub struct AppResponse {
     pub auto_start: bool,
     pub script_file: Option<String>,
     pub order: u32,
+    pub started_at: Option<u64>,
+    pub uptime_seconds: Option<u64>,
 }
 
 // ─── App Manager ────────────────────────────────────────────────────
@@ -176,6 +179,7 @@ impl AppManager {
                             logs: LogSink::new(log_tx.clone(), "run"),
                             build_logs: LogSink::new(log_tx.clone(), "build"),
                             log_tx,
+                            started_at: None,
                         }
                     });
                 }
@@ -194,6 +198,7 @@ impl AppManager {
         let state = self.state.lock().unwrap();
         let mut list: Vec<_> = state.apps.values().collect();
         list.sort_by_key(|a| a.entry.order);
+        let now = now_secs();
         list.into_iter().map(|a| AppResponse {
             id: a.entry.id,
             name: a.entry.name.clone(),
@@ -210,6 +215,8 @@ impl AppManager {
             auto_start: a.entry.auto_start,
             script_file: a.entry.script_file.clone(),
             order: a.entry.order,
+            started_at: a.started_at,
+            uptime_seconds: a.started_at.map(|s| now.saturating_sub(s)),
         }).collect()
     }
 
@@ -243,6 +250,7 @@ impl AppManager {
                 logs: LogSink::new(log_tx.clone(), "run"),
                 build_logs: LogSink::new(log_tx.clone(), "build"),
                 log_tx,
+                started_at: None,
             }
         });
         drop(state);
@@ -421,6 +429,7 @@ impl AppManager {
                 app.status = "running".into();
                 app.static_shutdown = Some(shutdown_tx);
                 app.pid = None;
+                app.started_at = Some(now_secs());
             }
             self.log_server(&format!("Started static: {} on port {}", entry.name, port));
             return Ok(());
@@ -526,6 +535,7 @@ impl AppManager {
                 if let Some(app) = state.apps.get_mut(&id) {
                     app.status = "stopped".into();
                     app.pid = None;
+                    app.started_at = None;
                 }
             });
 
@@ -533,6 +543,7 @@ impl AppManager {
             if let Some(app) = state.apps.get_mut(&id) {
                 app.status = "running".into();
                 app.pid = Some(pid);
+                app.started_at = Some(now_secs());
             }
             self.log_server(&format!("Started script: {} (id={}, pid={})", entry.name, id, pid));
             return Ok(());
@@ -605,6 +616,7 @@ impl AppManager {
             if let Some(app) = state.apps.get_mut(&id) {
                 app.status = "stopped".into();
                 app.pid = None;
+                app.started_at = None;
             }
         });
 
@@ -612,6 +624,7 @@ impl AppManager {
         if let Some(app) = state.apps.get_mut(&id) {
             app.status = "running".into();
             app.pid = Some(pid);
+            app.started_at = Some(now_secs());
         }
         self.log_server(&format!("Started: {} (id={}, pid={})", entry.name, id, pid));
         Ok(())
@@ -836,6 +849,14 @@ fn stop_runtime(app: &mut AppRuntime) {
         let _ = tx.send(());
     }
     app.status = "stopped".into();
+    app.started_at = None;
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn kill_tree(pid: u32) {
