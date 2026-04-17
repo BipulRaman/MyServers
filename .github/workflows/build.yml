@@ -64,12 +64,12 @@ jobs:
             binary: appnest
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: appnest-macos-arm64
+            artifact_name: appnest-macos-universal
             binary: appnest
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact_name: appnest-macos-x86_64
-            binary: appnest
+            # Build a universal (fat) macOS binary: one file runs natively on
+            # both Apple Silicon and Intel. Avoids the deprecated macos-13
+            # runner, which is queueing for 20+ minutes.
+            universal: "true"
 
     runs-on: ${{ matrix.os }}
 
@@ -81,21 +81,44 @@ jobs:
       - uses: actions/checkout@v4
         # Shallow checkout — we already have the version from the meta job.
 
-      - name: Stamp Cargo.toml version
+      - name: Stamp Cargo.toml + Cargo.lock version
         shell: bash
         run: |
           ver="${BUILD_TAG#v}"
+
+          # 1. Cargo.toml — replace the first `version = "..."` line.
           awk -v ver="$ver" '
             !done && /^version[[:space:]]*=/ { print "version = \"" ver "\""; done=1; next }
             { print }
           ' app/Cargo.toml > app/Cargo.toml.new
           mv app/Cargo.toml.new app/Cargo.toml
+
+          # 2. Cargo.lock — the lockfile has a `[[package]] name = "appnest"`
+          # stanza followed by its own `version = "..."`. We must keep them in
+          # sync, otherwise `cargo build --locked` refuses to run because the
+          # workspace package's version no longer matches the lockfile.
+          if [ -f app/Cargo.lock ]; then
+            awk -v ver="$ver" '
+              /^\[\[package\]\]/ { in_pkg=1; is_appnest=0 }
+              in_pkg && /^name[[:space:]]*=[[:space:]]*"appnest"/ { is_appnest=1 }
+              in_pkg && is_appnest && /^version[[:space:]]*=/ {
+                print "version = \"" ver "\""; is_appnest=0; in_pkg=0; next
+              }
+              /^$/ { in_pkg=0; is_appnest=0 }
+              { print }
+            ' app/Cargo.lock > app/Cargo.lock.new
+            mv app/Cargo.lock.new app/Cargo.lock
+          fi
+
           echo "Stamped version: $ver"
+          grep -E '^(name|version)' app/Cargo.toml | head -n2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          # For the universal macOS build we need BOTH darwin targets so we can
+          # compile each slice and `lipo` them together on a single runner.
+          targets: ${{ matrix.universal == 'true' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
 
       # Runner images already ship mingw-w64 under C:\ProgramData\mingw64\mingw64\bin
       # (or at worst C:\ProgramData\Chocolatey\lib\mingw). Point Cargo at it instead
@@ -145,15 +168,36 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
 
       - name: Build release
+        if: matrix.universal != 'true'
         working-directory: app
         shell: bash
         run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Build universal macOS release
+        if: matrix.universal == 'true'
+        working-directory: app
+        shell: bash
+        # Build both slices and fuse them with `lipo`. The resulting fat
+        # binary runs natively on Apple Silicon AND Intel Macs, so we ship
+        # one asset instead of two. `lipo` is preinstalled on macOS runners.
+        run: |
+          cargo build --release --target aarch64-apple-darwin --locked
+          cargo build --release --target x86_64-apple-darwin  --locked
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create -output target/universal-apple-darwin/release/${{ matrix.binary }} \
+            target/aarch64-apple-darwin/release/${{ matrix.binary }} \
+            target/x86_64-apple-darwin/release/${{ matrix.binary }}
+          file target/universal-apple-darwin/release/${{ matrix.binary }}
 
       - name: Prepare artifact
         shell: bash
         run: |
           mkdir -p dist
-          src="app/target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          if [[ "${{ matrix.universal }}" == "true" ]]; then
+            src="app/target/universal-apple-darwin/release/${{ matrix.binary }}"
+          else
+            src="app/target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          fi
           cp "$src" "dist/${{ matrix.binary }}"
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "dist/${{ matrix.binary }}"
