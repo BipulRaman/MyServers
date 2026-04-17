@@ -451,9 +451,14 @@ async fn check_update() -> Json<UpdateInfo> {
     let ua = format!("AppNest/{}", current);
     // ureq is blocking; run on the blocking pool so we don't stall the async runtime.
     let result: Result<GhRelease, String> = tokio::task::spawn_blocking(move || {
+        let tls_connector = match native_tls::TlsConnector::new() {
+            Ok(c) => std::sync::Arc::new(c),
+            Err(e) => return Err(format!("tls init: {}", e)),
+        };
         let agent = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(8))
             .user_agent(&ua)
+            .tls_connector(tls_connector)
             .build();
         match agent.get(&url).call() {
             Ok(resp) => resp.into_json::<GhRelease>().map_err(|e| format!("parse: {}", e)),
