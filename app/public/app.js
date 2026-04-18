@@ -1,5 +1,5 @@
 const API = '/api/apps';
-let pollTimer = null, currentLogId = null, currentLogTab = 'run';
+let pollTimer = null, currentLogId = null;
 let searchQuery = '';
 let statusFilter = 'all'; // 'all' | 'running' | 'stopped'
 const expandedPreviews = new Set(); // ids whose inline preview is open
@@ -604,7 +604,6 @@ let followMode = true;
 
 async function showLogs(id, name) {
   currentLogId = id;
-  currentLogTab = 'run';
   runBuf = '';
   buildBuf = '';
   logSearchQuery = '';
@@ -614,7 +613,6 @@ async function showLogs(id, name) {
   updateFollowPill();
   document.getElementById('logTitle').textContent = name;
   document.getElementById('logModal').classList.remove('hidden');
-  updateTabs();
   document.getElementById('logContent').innerHTML = '<span class="log-debug">(connecting…)</span>';
   openLogStream(id);
 }
@@ -640,7 +638,7 @@ function openLogStream(id) {
         // Cap buffer size in browser too
         if (runBuf.length > 500_000) runBuf = runBuf.slice(-400_000);
         if (buildBuf.length > 500_000) buildBuf = buildBuf.slice(-400_000);
-        if (currentLogTab === 'run' || currentLogTab === 'build') renderStreamedLogs();
+        renderStreamedLogs();
       } catch (e) {}
     });
     es.onerror = () => {
@@ -745,8 +743,11 @@ function linkifyUrls(text) {
 }
 
 function getBufFor(tab) {
-  if (tab === 'build') return buildBuf;
-  return runBuf;
+  // Build + runtime are merged into a single 'run' view.
+  const parts = [];
+  if (buildBuf) parts.push(buildBuf);
+  if (runBuf) parts.push(runBuf);
+  return parts.join('');
 }
 
 function applyLogFilter(raw) {
@@ -794,9 +795,8 @@ function highlightMatches($el, q) {
 function renderStreamedLogs() {
   const $el = document.getElementById('logContent');
   if (!$el) return;
-  const raw = currentLogTab === 'run'
-    ? (runBuf || '(waiting for output…)')
-    : (buildBuf || '(no build output)');
+  const merged = (buildBuf || '') + (runBuf || '');
+  const raw = merged || '(waiting for output…)';
   const filtered = applyLogFilter(raw);
   $el.innerHTML = linkifyUrls(filtered);
   highlightMatches($el, logSearchQuery);
@@ -806,16 +806,10 @@ function renderStreamedLogs() {
 async function refreshLogs() {
   if (!currentLogId) return;
   const $el = document.getElementById('logContent');
-  let raw;
-  if (currentLogTab === 'applog') {
-    const d = await api(`${API}/${currentLogId}/applogs`);
-    raw = d.log || '(empty)';
-  } else {
-    const d = await api(`${API}/${currentLogId}/logs`);
-    raw = currentLogTab === 'run'
-      ? (d.logs || '(waiting for output…)')
-      : (d.buildLogs || '(no build output)');
-  }
+  const d = await api(`${API}/${currentLogId}/logs`);
+  const buildPart = d.buildLogs || '';
+  const runPart = d.logs || '';
+  const raw = (buildPart + runPart) || '(waiting for output…)';
   const filtered = applyLogFilter(raw);
   $el.innerHTML = linkifyUrls(filtered);
   highlightMatches($el, logSearchQuery);
@@ -848,32 +842,17 @@ function updateFollowPill() {
   const $search = document.getElementById('logSearchInput');
   if ($search) $search.addEventListener('input', e => {
     logSearchQuery = e.target.value;
-    if (currentLogTab === 'applog') refreshLogs();
-    else renderStreamedLogs();
+    renderStreamedLogs();
   });
 })();
 
 document.querySelectorAll('.tab-bar .tab').forEach(b => {
   b.onclick = () => {
-    currentLogTab = b.dataset.tab;
-    updateTabs();
-    if (currentLogTab === 'applog') {
-      // Applog is file-backed; poll
-      stopPoll();
-      refreshLogs();
-      startPoll();
-    } else {
-      stopPoll();
-      renderStreamedLogs();
-    }
+    // Tabs removed: nothing to switch.
   };
 });
 
-function updateTabs() {
-  document.querySelectorAll('.tab-bar .tab').forEach(b =>
-    b.classList.toggle('active', b.dataset.tab === currentLogTab)
-  );
-}
+function updateTabs() {}
 
 document.getElementById('btnCloseLogs').onclick = () => {
   closeModal('logModal');
@@ -1040,7 +1019,12 @@ async function refreshPreview(id) {
   if (!el) return;
   try {
     const d = await api(`${API}/${id}/logs`);
-    const raw = stripAnsi(d.logs || '').trim();
+    const buildRaw = stripAnsi(d.buildLogs || '').trim();
+    const runRaw = stripAnsi(d.logs || '').trim();
+    const parts = [];
+    if (buildRaw) parts.push(buildRaw);
+    if (runRaw) parts.push(runRaw);
+    const raw = parts.join('\n');
     if (!raw) { el.innerHTML = '<span class="empty">(waiting for output…)</span>'; return; }
     const lines = raw.split('\n');
     const tail = lines.slice(-6).join('\n');
